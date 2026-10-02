@@ -1,0 +1,199 @@
+{
+ "name": "MedMinute — minutes mailing",
+ "nodes": [
+  {
+   "id": "hook",
+   "name": "Webhook: mailing",
+   "type": "n8n-nodes-base.webhook",
+   "typeVersion": 2,
+   "position": [
+    -340,
+    0
+   ],
+   "webhookId": "medminute-email",
+   "parameters": {
+    "httpMethod": "POST",
+    "path": "medminute-email",
+    "responseMode": "lastNode",
+    "options": {
+     "rawBody": false
+    }
+   }
+  },
+  {
+   "id": "letter",
+   "name": "Build email",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    -120,
+    0
+   ],
+   "parameters": {
+    "jsCode": "// Build the email from the markdown report: subject, HTML body and the attachment\nconst src = $json.body || $json;\nconst to = (Array.isArray(src.to) ? src.to : String(src.to || '').split(/[,;\\s]+/)).filter(Boolean);\nif (!to.length) throw new Error('no addresses given');\nif (!src.markdown) throw new Error('empty report');\n\n// ONLY the first part of the report goes into the email body — the letter: participants, agenda, items by\n// topic, decisions, actions. The minutes go as an attachment, otherwise the email is unreadable.\n// Split on the \"---\" line, not on the \"## Letter\" heading: headings are translated into the minutes\n// language (e.g. Scrisoare in Romanian), but the separator is the same in all languages.\nconst md = String(src.markdown);\nconst parts = md.replace(/\\r/g, '').split(/^---\\s*$/m);\nlet letter = parts[0].replace(/^##\\s+.*$/m, '').trim();\n// The very first line \"**Subject:** …\" (in any language) becomes the email subject and is removed\n// from the body. Only the first line is checked: further down participants and dates have the same bold labels.\nconst lines = letter.split('\\n');\nconst subjLine = /^\\*\\*[^*]+:\\*\\*\\s*(.+)$/.exec(lines[0].trim());\nif (subjLine) letter = lines.slice(1).join('\\n').trim();\n\n// Convert the markup into simple HTML: headings, lists, tables, bold.\nconst esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst inline = (s) => esc(s).replace(/\\*\\*(.+?)\\*\\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');\nconst out = [];\nlet list = null;\nlet table = false;\nconst closeAll = () => {\n  if (list) { out.push(`</${list}>`); list = null; }\n  if (table) { out.push('</table>'); table = false; }\n};\nfor (const raw of letter.split('\\n')) {\n  const line = raw.replace(/\\s+$/, '');\n  const head = /^(#{1,4})\\s+(.*)$/.exec(line);\n  const li = /^[-*]\\s+(.*)$/.exec(line);\n  const num = /^(\\d+)[.)]\\s+(.*)$/.exec(line);\n  const row = /^\\|(.+)\\|$/.exec(line);\n  if (!line.trim()) { closeAll(); continue; }\n  if (head) { closeAll(); out.push(`<h${head[1].length}>${inline(head[2])}</h${head[1].length}>`); continue; }\n  if (/^\\s*\\|?\\s*:?-{3,}/.test(line) && table) continue;          // the rule under the table header\n  if (row) {\n    if (!table) { closeAll(); out.push('<table cellpadding=\"6\" border=\"1\" style=\"border-collapse:collapse;font-size:14px\">'); table = true; }\n    const cells = row[1].split('|').map((c) => `<td>${inline(c.trim())}</td>`).join('');\n    out.push(`<tr>${cells}</tr>`);\n    continue;\n  }\n  if (table) { out.push('</table>'); table = false; }\n  if (li) {\n    if (list !== 'ul') { closeAll(); out.push('<ul>'); list = 'ul'; }\n    out.push(`<li>${inline(li[1])}</li>`);\n    continue;\n  }\n  if (num) {\n    if (list !== 'ol') { closeAll(); out.push('<ol>'); list = 'ol'; }\n    out.push(`<li>${inline(num[2])}</li>`);\n    continue;\n  }\n  if (list) { out.push(`</${list}>`); list = null; }\n  out.push(`<p>${inline(line)}</p>`);\n}\ncloseAll();\n\nconst note = src.note ? `<p style=\"background:#f1f5f9;padding:10px;border-radius:8px\">${esc(src.note)}</p>` : '';\nconst html = `<div style=\"font-family:Arial,Helvetica,sans-serif;color:#0f172a;max-width:760px\">`\n  + `<p style=\"color:#64748b;font-size:13px\">Meeting minutes prepared automatically (MedMeet, MedMinute).`\n  + (src.meetingDate ? ` Meeting date: ${esc(src.meetingDate)}.` : '') + `</p>`\n  + note + out.join('\\n')\n  + `<hr><p style=\"color:#64748b;font-size:12px\">The full minutes are attached.`\n  + (src.meetingUrl ? ` Meeting on the site: ${esc(src.meetingUrl)}` : '') + `</p></div>`;\n\nreturn [{\n  json: {\n    jobId: src.jobId || '', mode: src.mode || 'online', lang: src.lang || 'ru',\n    to: to.join(', '), recipients: to,\n    subject: (subjLine ? subjLine[1].trim() : '') || src.subject\n      || `Meeting minutes${src.title ? `: ${src.title}` : ''}`,\n    html, fileName: src.fileName || 'protocol.md',\n  },\n  binary: {\n    report: {\n      // The site sends a PDF if it was built, otherwise markdown — the attachment type comes from there too.\n      data: src.fileBase64 || Buffer.from(String(src.markdown), 'utf8').toString('base64'),\n      mimeType: src.mimeType || 'text/markdown',\n      fileName: src.fileName || 'protocol.md',\n      fileExtension: src.fileExtension || 'md',\n    },\n  },\n}];"
+   }
+  },
+  {
+   "id": "split",
+   "name": "Online?",
+   "type": "n8n-nodes-base.if",
+   "typeVersion": 2.2,
+   "position": [
+    100,
+    0
+   ],
+   "parameters": {
+    "conditions": {
+     "options": {
+      "caseSensitive": true,
+      "leftValue": "",
+      "typeValidation": "strict",
+      "version": 2
+     },
+     "conditions": [
+      {
+       "id": "mode",
+       "leftValue": "={{ $json.mode }}",
+       "rightValue": "offline",
+       "operator": {
+        "type": "string",
+        "operation": "notEquals"
+       }
+      }
+     ],
+     "combinator": "and"
+    },
+    "options": {}
+   }
+  },
+  {
+   "id": "mail",
+   "name": "Send (SMTP)",
+   "type": "n8n-nodes-base.emailSend",
+   "typeVersion": 2.1,
+   "position": [
+    340,
+    -110
+   ],
+   "parameters": {
+    "fromEmail": "SENDER@example.com",
+    "toEmail": "={{ $json.to }}",
+    "subject": "={{ $json.subject }}",
+    "emailFormat": "html",
+    "html": "={{ $json.html }}",
+    "options": {
+     "attachments": "report",
+     "appendAttribution": false
+    }
+   }
+  },
+  {
+   "id": "smtp",
+   "name": "Send (SMTP, offline)",
+   "type": "n8n-nodes-base.emailSend",
+   "typeVersion": 2.1,
+   "position": [
+    340,
+    110
+   ],
+   "disabled": true,
+   "parameters": {
+    "fromEmail": "SENDER@example.com",
+    "toEmail": "={{ $json.to }}",
+    "subject": "={{ $json.subject }}",
+    "emailFormat": "html",
+    "html": "={{ $json.html }}",
+    "options": {
+     "attachments": "report",
+     "appendAttribution": false
+    }
+   },
+   "notes": "Disabled: there is no local SMTP on the network. Enable it and set the credential once a mail server is available."
+  },
+  {
+   "id": "answer",
+   "name": "Reply to site",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    580,
+    0
+   ],
+   "parameters": {
+    "jsCode": "// What to return to the site: it writes this into the sending log of the meeting card\nconst first = $input.first().json;\nconst mail = $('Build email').first().json;\nreturn [{ json: {\n  ok: true, jobId: mail.jobId, to: mail.recipients, lang: mail.lang,\n  subject: mail.subject, transport: mail.mode === 'offline' ? 'smtp (disabled)' : 'smtp',\n  messageId: first.messageId || first.id || null,\n} }];"
+   }
+  }
+ ],
+ "connections": {
+  "Webhook: mailing": {
+   "main": [
+    [
+     {
+      "node": "Build email",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Build email": {
+   "main": [
+    [
+     {
+      "node": "Online?",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Online?": {
+   "main": [
+    [
+     {
+      "node": "Send (SMTP)",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Send (SMTP, offline)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Send (SMTP)": {
+   "main": [
+    [
+     {
+      "node": "Reply to site",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Send (SMTP, offline)": {
+   "main": [
+    [
+     {
+      "node": "Reply to site",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1",
+  "callerPolicy": "workflowsFromSameOwner",
+  "availableInMCP": false
+ },
+ "meta": {
+  "templateCredsSetupCompleted": true
+ }
+}

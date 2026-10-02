@@ -1,0 +1,1118 @@
+{
+ "name": "MedMinute Online",
+ "nodes": [
+  {
+   "parameters": {
+    "httpMethod": "POST",
+    "path": "medminute-online",
+    "options": {}
+   },
+   "id": "hook-medminute-online",
+   "name": "Start (webhook from site)",
+   "type": "n8n-nodes-base.webhook",
+   "typeVersion": 2,
+   "position": [
+    12160,
+    6224
+   ],
+   "webhookId": "medminute-medminute-online"
+  },
+  {
+   "parameters": {
+    "jsCode": "// Job data from the site localhost:7777 (one flat record for the whole run)\nconst b = $input.first().json.body || $input.first().json;\nif (!b.jobId) throw new Error('Webhook called without jobId — it must be started from the site http://localhost:7777');\nconst audioDir = (b.audioDir || 'C:/medminute/audio').replace(/\\\\/g, '/');\nreturn [{ json: {\n  jobId: b.jobId,\n  mode: b.mode || 'online',\n  fileName: b.fileName || 'audio',\n  ext: b.ext || 'm4a',\n  inputPath: (b.inputPath || `${audioDir}/${b.jobId}_input.${b.ext || 'm4a'}`).replace(/\\\\/g, '/'),\n  audioDir,\n  reportsDir: (b.reportsDir || 'C:/medminute/reports').replace(/\\\\/g, '/'),\n  submittedAt: b.submittedAt || new Date().toISOString(),\n  callbackUrl: b.callbackUrl || `http://localhost:7777/api/jobs/${b.jobId}`,\n} }];"
+   },
+   "id": "job-ctx",
+   "name": "Job",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    12384,
+    6224
+   ]
+  },
+  {
+   "parameters": {
+    "command": "=C:/medminute/ffmpeg/bin/ffmpeg.exe -y -loglevel error -i \"C:/medminute/audio/{{ $('Job').first().json.jobId }}_input.{{ $('Job').first().json.ext }}\" -ac 1 -ar 16000 -c:a libmp3lame -b:a 32k \"C:/medminute/audio/{{ $('Job').first().json.jobId }}_full.mp3\""
+   },
+   "id": "214abb65-b80b-43e4-9f75-fd17ded5d960",
+   "name": "Compress whole recording (ffmpeg)",
+   "type": "n8n-nodes-base.executeCommand",
+   "typeVersion": 1,
+   "position": [
+    12608,
+    5984
+   ],
+   "executeOnce": true
+  },
+  {
+   "parameters": {
+    "fileSelector": "=C:/medminute/audio/{{ $('Job').first().json.jobId }}_full.mp3",
+    "options": {}
+   },
+   "id": "7232b678-dfe0-4bde-b567-23b63a14a40e",
+   "name": "Read compressed recording",
+   "type": "n8n-nodes-base.readWriteFile",
+   "typeVersion": 1,
+   "position": [
+    12832,
+    5984
+   ],
+   "executeOnce": true
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://api.openai.com/v1/audio/transcriptions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openAiApi",
+    "sendBody": true,
+    "contentType": "multipart-form-data",
+    "bodyParameters": {
+     "parameters": [
+      {
+       "parameterType": "formBinaryData",
+       "name": "file",
+       "inputDataFieldName": "data"
+      },
+      {
+       "name": "model",
+       "value": "gpt-4o-transcribe-diarize"
+      },
+      {
+       "name": "response_format",
+       "value": "diarized_json"
+      },
+      {
+       "name": "chunking_strategy",
+       "value": "auto"
+      }
+     ]
+    },
+    "options": {
+     "timeout": 1800000
+    }
+   },
+   "id": "b4928134-a0ed-4223-8151-c8bf0921e926",
+   "name": "Who speaks (gpt-4o-transcribe-diarize)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    13040,
+    5984
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 5000
+  },
+  {
+   "parameters": {
+    "jsCode": "// Speaker labels across the whole recording: A, B, C… → Participant 1, 2, 3 (in order of appearance)\nconst r = $input.first().json || {};\nconst segs = Array.isArray(r.segments) ? r.segments : [];\nconst map = new Map();\nconst who = (raw) => {\n  raw = String(raw ?? '?').trim() || '?';\n  if (!map.has(raw)) map.set(raw, `Participant ${map.size + 1}`);\n  return map.get(raw);\n};\nconst out = segs\n  .map(s => ({ t: Number(s.start) || 0, end: Number(s.end) || 0, spk: who(s.speaker), text: String(s.text || '').trim() }))\n  .filter(s => s.text);\nreturn [{ json: { speakers: [...map.values()], segments: out } }];\n"
+   },
+   "id": "356a87a0-4494-4833-97b2-5ee6d444bc49",
+   "name": "Speakers (format)",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    13264,
+    5984
+   ]
+  },
+  {
+   "parameters": {
+    "command": "=C:/medminute/ffmpeg/bin/ffmpeg.exe -hide_banner -nostats -i \"C:/medminute/audio/{{ $('Job').first().json.jobId }}_input.{{ $('Job').first().json.ext }}\" -af silencedetect=noise=-30dB:d=0.3 -f null -"
+   },
+   "id": "4edb41f2-0f9d-4456-8833-12a074179752",
+   "name": "Find pauses (ffmpeg)",
+   "type": "n8n-nodes-base.executeCommand",
+   "typeVersion": 1,
+   "position": [
+    12608,
+    6464
+   ],
+   "executeOnce": true
+  },
+  {
+   "parameters": {
+    "jsCode": "// ===== SLICING: two versions (15s and 5s), cut in pauses =====\n// Two slicings: 15s (better Romanian) and 5s (loses nothing, keeps the language). prompt: 'ro' | 'neutral' | 'none'\n// NOTE: the 'ro' prompt is a Whisper priming prompt, not an instruction. Its Russian fragment ('Русский — кириллицей.')\n// is intentional: it primes the model to write Russian speech in Cyrillic. Do not translate it.\nconst CONFIGS = [\n  { name: '15s', MIN: 10,  TARGET: 15, MAX: 19,  OVERLAP: 0.5, prompt: 'ro' },\n  { name: '5s',  MIN: 3.5, TARGET: 5,  MAX: 6.5, OVERLAP: 0.5, prompt: 'ro' },\n];\nconst MERGE_FROM = ['15s', '5s'];\nconst PROMPTS = {\n  ro: 'Transcrie exact ce se aude, în limba vorbită, fără traducere. Română — cu litere latine și diacritice (ă, â, î, ș, ț). Русский — кириллицей. English — in English. Ședință medicală MedMinute: noradrenalină, dobutamină, creatinină, uree, meropenem, amikacină, fluconazol, hidronefroză, nefrostomă, stent, BIPAP, ECO, EKG, hemoglobină, lactat.',\n  neutral: 'Medical team meeting. Speakers switch between Russian, Romanian and English, often inside one sentence. Write every word exactly in the language it was spoken: Russian in Cyrillic, Romanian in Latin letters with diacritics, English in English. Never translate.',\n  none: '.',\n};\nconst PAD = 0.6; // silence at the end of each segment\n// ==========================================================================\n\nconst log = String($json.stderr || '') + '\\n' + String($json.stdout || '');\nconst hms = (m) => (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]);\nlet total = null;\nconst dm = log.match(/Duration:\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)/);\nif (dm) total = hms(dm);\nelse {\n  // Recording from the in-browser recorder: Chrome writes WebM as a stream, there is no duration in the header (Duration: N/A).\n  // Take the last ffmpeg progress line — time=00:00:17.75.\n  const ts = [...log.matchAll(/time=\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)/g)];\n  if (ts.length) total = hms(ts[ts.length - 1]);\n}\nif (!total || !isFinite(total) || total <= 0) {\n  throw new Error('ffmpeg did not return a duration. Log:\\n' + log.slice(0, 800));\n}\nconst pauses = [...log.matchAll(/silence_end:\\s*([\\d.]+)\\s*\\|\\s*silence_duration:\\s*([\\d.]+)/g)]\n  .map(m => ({ mid: +m[1] - (+m[2]) / 2, dur: +m[2] }))\n  .filter(p => p.mid > 0 && p.mid < total);\n\nconst id = $('Job').first().json.jobId;\nconst ext = $('Job').first().json.ext;\nconst input = `C:/medminute/audio/${id}_input.${ext}`;\nconst out = [];\n\nfor (const c of CONFIGS) {\n  const cuts = []; let last = 0, forced = 0;\n  while (total - last > c.MAX) {\n    const cands = pauses.filter(p => p.mid >= last + c.MIN && p.mid <= last + c.MAX);\n    let cut;\n    if (cands.length) {\n      cands.sort((a, b) => (b.dur - Math.abs(b.mid - last - c.TARGET) * 0.1) - (a.dur - Math.abs(a.mid - last - c.TARGET) * 0.1));\n      cut = cands[0].mid;\n    } else { cut = last + c.TARGET; forced++; }\n    cuts.push(+cut.toFixed(2)); last = cut;\n  }\n  const b = [0, ...cuts, +total.toFixed(2)];\n  for (let i = 0; i < b.length - 1; i++) {\n    const cs = Math.max(0, b[i] - c.OVERLAP), ce = Math.min(total, b[i + 1] + c.OVERLAP);\n    const file = `C:/medminute/audio/${id}_${c.name}__seg_${String(i).padStart(4, '0')}.mp3`;\n    out.push({ json: {\n      config: c.name, prompt: PROMPTS[c.prompt] ?? '.', mergeFrom: MERGE_FROM, segIndex: i, start: b[i], forced, segCount: b.length - 1, total: +total.toFixed(1),\n      cmd: `C:/medminute/ffmpeg/bin/ffmpeg.exe -y -loglevel error -ss ${cs.toFixed(2)} -t ${(ce - cs).toFixed(2)} -i \"${input}\" -af apad=pad_dur=${PAD} -ac 1 -ar 16000 -c:a libmp3lame -b:a 64k \"${file}\"`,\n    } });\n  }\n}\nreturn out;\n"
+   },
+   "id": "217de9c0-99ed-4837-8c2a-758faa97c554",
+   "name": "Slicing variants",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    12832,
+    6464
+   ]
+  },
+  {
+   "parameters": {
+    "executeOnce": false,
+    "command": "={{ $json.cmd }}"
+   },
+   "id": "4f8d90a1-7b63-4b1b-a89d-c07a9bcfe74e",
+   "name": "Cut segments (ffmpeg)",
+   "type": "n8n-nodes-base.executeCommand",
+   "typeVersion": 1,
+   "position": [
+    13040,
+    6464
+   ]
+  },
+  {
+   "parameters": {
+    "fileSelector": "=C:/medminute/audio/{{ $('Job').first().json.jobId }}_*__seg_*.mp3",
+    "options": {}
+   },
+   "id": "e7808e54-6084-4802-b837-1c40730fa731",
+   "name": "Read segments",
+   "type": "n8n-nodes-base.readWriteFile",
+   "typeVersion": 1,
+   "position": [
+    13264,
+    6464
+   ],
+   "executeOnce": true
+  },
+  {
+   "parameters": {
+    "jsCode": "const plan = new Map($('Slicing variants').all().map(i => [`${i.json.config}|${i.json.segIndex}`, i.json]));\nconst items = $input.all().map(it => {\n  const name = it.binary?.data?.fileName || '';\n  // jobId contains a hyphen and letters (20260927094732-95b9d4), so the ^\\d+_ anchor did not match:\n  // all segments fell into the '?' bucket, V15 and V5 came out empty, and the transcript was silently\n  // built from diarize alone. The config name is taken as the piece before __seg_.\n  const m = name.match(/_([^_]+)__seg_(\\d+)\\.mp3$/);\n  const config = m ? m[1] : '?', idx = m ? parseInt(m[2], 10) : 0;\n  const p = plan.get(`${config}|${idx}`) || {};\n  return { json: { config, segIndex: idx, offsetSec: p.start ?? 0, prompt: p.prompt || '.' }, binary: it.binary };\n});\nitems.sort((a, b) => a.json.config.localeCompare(b.json.config) || a.json.segIndex - b.json.segIndex);\n// Fail loudly: without this check, empty V15 and V5 reached the merge step and the transcript\n// was built from diarize alone — plausible-looking text, but completely different.\nif (!items.length || items.every(i => i.json.config === '?')) {\n  throw new Error('could not parse segment names: ' + (items[0]?.binary?.data?.fileName || 'no files'));\n}\nreturn items;\n"
+   },
+   "id": "665dd63f-f99f-4568-b3a6-b94999f7940a",
+   "name": "Number segments",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    13488,
+    6464
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://api.openai.com/v1/audio/transcriptions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openAiApi",
+    "sendBody": true,
+    "contentType": "multipart-form-data",
+    "bodyParameters": {
+     "parameters": [
+      {
+       "parameterType": "formBinaryData",
+       "name": "file",
+       "inputDataFieldName": "data"
+      },
+      {
+       "name": "model",
+       "value": "gpt-4o-transcribe"
+      },
+      {
+       "name": "response_format",
+       "value": "json"
+      },
+      {
+       "name": "prompt",
+       "value": "={{ $json.prompt }}"
+      }
+     ]
+    },
+    "options": {
+     "batching": {
+      "batch": {
+       "batchSize": 8
+      }
+     },
+     "timeout": 180000
+    }
+   },
+   "id": "64054b5f-286d-4aa2-b075-5dc610468926",
+   "name": "Transcribe 15s + 5s (gpt-4o-transcribe)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    13712,
+    6464
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 3000
+  },
+  {
+   "parameters": {
+    "jsCode": "// Joins each slicing (15s, 5s) into a list of utterances with seconds; removes duplicates at the seams and junk\nconst segs = $('Number segments').all().map(i => i.json);\nconst normW = (w) => w.toLowerCase().replace(/ş/g, 'ș').replace(/ţ/g, 'ț').replace(/ё/g, 'е').replace(/[^\\p{L}\\p{N}]/gu, '');\nconst TERMS = ['noradrenalin', 'dobutamin', 'creatinin', 'uree', 'meropenem', 'amikacin', 'fluconazol', 'hidronefroz', 'nefrostom', 'bipap', 'hemoglobin', 'lactat'];\n// The Russian phrases below are intentional: they match Whisper hallucinations in Russian (YouTube-style\n// endings on silence) and the regurgitated priming prompt. Do not translate them.\nconst junk = (t) => {\n  if (/(subtitr|vizionare|субтитр|продолжение следует|спасибо за просмотр|thanks for watching|amara\\.org|transcrie exact|кириллицей|ședință medicală medminute|never translate|medical team meeting)/i.test(t)) return true;\n  const low = t.toLowerCase();\n  return TERMS.filter(x => low.includes(x)).length >= 3;\n};\nconst byCfg = {};\n$input.all().forEach((it, i) => {\n  const s = segs[i]; if (!s) return;\n  (byCfg[s.config] ||= []).push({ t: s.offsetSec, idx: s.segIndex, text: String(it.json.text || '').replace(/\\s+/g, ' ').trim() });\n});\nconst variants = {};\nfor (const [cfg, arr] of Object.entries(byCfg)) {\n  arr.sort((a, b) => a.idx - b.idx);\n  let prev = []; const out = [];\n  for (const x of arr) {\n    if (!x.text || junk(x.text)) continue;\n    let w = x.text.split(' ');\n    for (let k = Math.min(8, prev.length, w.length); k >= 1; k--) {\n      if (prev.slice(-k).map(normW).join(' ') === w.slice(0, k).map(normW).join(' ')) { w = w.slice(k); break; }\n    }\n    if (!w.length) continue;\n    prev = w; out.push({ t: x.t, text: w.join(' ') });\n  }\n  variants[cfg] = out;\n}\nreturn [{ json: { variants } }];\n"
+   },
+   "id": "f57edda5-c991-4fef-b4cd-bb18050fa839",
+   "name": "Join versions",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    13920,
+    6464
+   ]
+  },
+  {
+   "parameters": {},
+   "id": "0a26fd21-fba5-41d9-ad30-537f9e25625d",
+   "name": "Wait for both branches",
+   "type": "n8n-nodes-base.merge",
+   "typeVersion": 3.2,
+   "position": [
+    14144,
+    6224
+   ]
+  },
+  {
+   "parameters": {
+    "command": "=powershell -NoProfile -Command \"Remove-Item -Force -ErrorAction SilentlyContinue 'C:/medminute/audio/{{ $('Job').first().json.jobId }}_full.mp3','C:/medminute/audio/{{ $('Job').first().json.jobId }}_*__seg_*.mp3'\""
+   },
+   "id": "778c1319-746f-4bf8-8eef-ceb30db286ce",
+   "name": "Delete temp files",
+   "type": "n8n-nodes-base.executeCommand",
+   "typeVersion": 1,
+   "position": [
+    14368,
+    6032
+   ],
+   "executeOnce": true
+  },
+  {
+   "parameters": {
+    "jsCode": "// Verbatim transcript — straight from recognition, without a model rewriting it.\n// Previously gpt-4.1 merged 5-minute windows: it saw V5, V15 and the speaker labels at once\n// and stitched them as it saw fit — edited words, inserted text from diarize,\n// paraphrased in places. Exactly this distortion reached the minutes and all the tables.\n// Now the text is taken as recognised (V5 — 3-5 second pieces, nothing gets swallowed),\n// V15 is not combined with it, and the speaker is assigned by timecode. The model does not touch the text.\nconst V = $('Join versions').first().json.variants || {};\nconst D = $('Speakers (format)').first().json.segments || [];\nconst base = V['5s'] || [];\nif (!base.length) {\n  throw new Error('recognition did not produce the V5 version — nothing to build the transcript from');\n}\nconst fmt = (s) => { s = Math.max(0, Math.round(+s || 0)); const p = n => String(n).padStart(2, '0');\n  const h = Math.floor(s / 3600); return (h ? p(h) + ':' : '') + p(Math.floor((s % 3600) / 60)) + ':' + p(s % 60); };\n\n// Who was speaking at this moment: the one whose labelled utterance overlaps the start of the piece,\n// otherwise the nearest in time. The diarize text is not used — only the label and the time.\nconst who = (t) => {\n  const hit = D.find(x => t >= x.t && t < (x.end || x.t))\n    || D.reduce((a, x) => (!a || Math.abs(x.t - t) < Math.abs(a.t - t) ? x : a), null);\n  return hit ? hit.spk : 'Participant 1';\n};\n\n// Dialogue: consecutive pieces from one person form one utterance, but no longer than 20 seconds,\n// otherwise a labelling failure would glue the whole recording into one line.\nconst BLOCK = 20;\nconst out = [];\nfor (const x of base) {\n  const said = String(x.text || '').trim();\n  if (!said) continue;\n  const spk = who(x.t);\n  const last = out[out.length - 1];\n  if (last && last.spk === spk && x.t - last.t < BLOCK) last.text += ' ' + said;\n  else out.push({ t: x.t, spk, text: said });\n}\nconst text = out.map(x => `[${fmt(x.t)}] ${x.spk}: ${x.text}`).join('\\n');\nreturn [{ json: { text, speakers: $('Speakers (format)').first().json.speakers } }];"
+   },
+   "id": "351ca226-afd6-4690-9bad-af1315f5270c",
+   "name": "Final transcript",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    14800,
+    6224
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "// Three minutes languages + people directory + original recording with language tags\nconst tz = 'Europe/Chisinau';\nconst sub = $('Job').first().json.submittedAt;\nconst meetingDate = (sub ? DateTime.fromISO(sub) : $now).setZone(tz).toFormat('dd.LL.yyyy');\nconst src = $json;\nconst text = src.text;\n\n// The utterance language is detected by script: Cyrillic → Russian, diacritics/function words → Romanian.\nconst RO_WORDS = /\\b(este|sunt|care|pentru|nu|si|cu|la|de|in|am|are|face|foarte|bine|pacient|pacienta|tensiune|doamna|domnul|acum|dupa|mai|dar|ca|sa|se|un|o)\\b/i;\nfunction langOf(line) {\n  const t = line.replace(/^\\[[\\d:]+\\]\\s*/, '').replace(/^[^:]{0,60}:\\s*/, '');\n  if (/[\\u0430-\\u044f\\u0451]/i.test(t)) return 'ru';\n  if (/[\\u0103\\u00e2\\u00ee\\u0219\\u021b\\u0102\\u00c2\\u00ce\\u0218\\u021a]/.test(t)) return 'ro';\n  if (RO_WORDS.test(t)) return 'ro';\n  return 'en';\n}\nconst LNAME = { ru: 'Russian', ro: 'Romanian', en: 'English' };\nconst lines = String(text || '').split('\\n').filter((l) => l.trim());\nconst counts = { ru: 0, ro: 0, en: 0 };\nconst marked = lines.map((l) => { const g = langOf(l); counts[g]++; return `\\`${g.toUpperCase()}\\` ${l}`; });\nconst totalLines = lines.length || 1;\nconst langStats = Object.entries(counts).filter(([, c]) => c)\n  .sort((a, b) => b[1] - a[1])\n  .map(([g, c]) => ({ lang: g, name: LNAME[g], lines: c, percent: Math.round((c / totalLines) * 100) }));\nconst langLine = langStats.map((s) => `${s.name} — ${s.percent}% (${s.lines} ${s.lines === 1 ? 'utterance' : 'utterances'})`).join(', ');\n\n// The people directory is built in \"Transcript with names\" — one for all minutes branches.\nconst roster = src.roster || '';\n\nconst original = marked.join('\\n');\n// Section headings in the minutes language. Without this the model translated the text but copied the headings\n// from the response schema as they were — and an untranslated heading stayed in the other-language minutes.\n// The schema headings are English; the 'ru' map below is intentionally in Russian: it is the Russian minutes output.\nconst HEADS = {\n  ru: 'Letter → Письмо; Subject → Тема; Participants → Участники; Agenda → Повестка; '\n    + 'Objectives → Цели; Decisions → Решения; Action items → Действия; Minutes of the meeting → Протокол встречи; '\n    + 'Date → Дата; Open questions → Открытые вопросы; Next meeting → Следующая встреча; Absentees → Отсутствовали; Agenda item → Пункт повестки; Key takeaways → Главные выводы; Materials → Материалы',\n  ro: 'Letter → Scrisoare; Subject → Subiect; Participants → Participanți; Agenda → Ordinea de zi; '\n    + 'Objectives → Obiective; Decisions → Decizii; Action items → Acțiuni; Minutes of the meeting → Proces-verbal al ședinței; '\n    + 'Date → Data; Open questions → Întrebări deschise; Next meeting → Următoarea ședință; Absentees → Absenți; Agenda item → Punct pe ordinea de zi; Key takeaways → Concluzii principale; Materials → Materiale',\n  en: 'they are already in English, write them as in the schema',\n};\n\nconst common = { meetingDate, text, roster, original, langStats, langLine };\nreturn [\n  { json: { ...common, lang: 'ru', langName: 'Russian', heads: HEADS.ru } },\n  { json: { ...common, lang: 'ro', langName: 'Romanian (limba română)', heads: HEADS.ro } },\n  { json: { ...common, lang: 'en', langName: 'English', heads: HEADS.en } },\n];"
+   },
+   "id": "781293cc-3ff0-4a72-98b2-c45a07784c88",
+   "name": "Three languages",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15024,
+    6224
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://api.openai.com/v1/chat/completions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openAiApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ { model: 'gpt-4.1', temperature: 0.1, messages: [ { role: 'system', content: 'You are the meeting secretary. Your task is to write the minutes of the meeting (MoM, Minutes of Meeting) from the transcript of a medical meeting. The speech in the transcript is mixed: Russian, Romanian, English. Speakers are labelled by voice: «Participant N», and if a name was spoken — «Name (Participant N)». ALWAYS call people by name when there is one: in the participants, the discussion, the decisions and the Action Items write «John Smith», not «Participant 2»; keep the «Participant N» label only for those whose name was not spoken. A «(?)» mark next to a name means the name is probable — keep it. People who are talked about (patients, doctors, relatives) are also called by name, as spoken. DO NOT ANONYMISE PATIENTS: write first names, surnames and bed/ward numbers exactly as spoken.\\n\\nLANGUAGE IS THE MAIN RULE, MORE IMPORTANT THAN ALL OTHERS. The transcript is mixed: Russian, Romanian and English are mixed within one sentence — that is how people spoke at the meeting, it is normal. Your job is to bring EVERYTHING into one language. Write the whole minutes (the email subject, section headings, agenda item headings, every item, every word) in ' + $json.langName + '. Not a SINGLE word in another language may remain in the finished minutes.\\nThis includes medical terms (blood pressure, oxygen saturation, intravenous fluids), states (alert, confused), roles (doctor, nurse, patient, urologist) and any everyday words — no matter which language they were spoken in. A person’s role is not a name, it is always translated.\\nBad: «The physician checked tensiunea arterială and saturația».\\nGood in English: «The physician checked blood pressure and oxygen saturation».\\nGood in Romanian: «Medicul a verificat tensiunea arterială și saturația».\\nLeave ONLY these unchanged: first names and surnames of people; brand names of drugs; numbers, doses and units of measurement; common abbreviations (ECG / EKG, CT). Write the international drug name in the spelling of the minutes language: Romanian norepinefrină → English norepinephrine. Do not invent the dose or the route — only what was spoken.\\nSECTION HEADINGS in the response schema are written in English only as a template — in the response itself write them in the minutes language exactly like this: ' + $json.heads + '.\\n\\nDATES: the meeting date is ' + $json.meetingDate + '. The current date is ' + $now.setZone(\"Europe/Chisinau\").toFormat(\"dd.LL.yyyy\") + '. Convert relative deadlines («by Friday», «tomorrow») into a date only if you are sure; otherwise keep them as said.' + $json.roster + '\\n\\nMoM RULES:\\n1. Only facts from the conversation. Do not invent decisions, tasks, owners, deadlines or numbers. The transcript is raw speech recognition, and words in it can be garbled: «Clepsiella» instead of Klebsiella, «auzeceșase» instead of optzeci și șase. If you recognise a word confidently — write it correctly. If you do not — skip that place, but never turn a jumble of sounds into a drug, a diagnosis or a name. Convert a number spoken in words into digits only if it was spoken in full; never complete a cut-off number.\\n2. WHAT WAS NOT SAID IS NOT IN THE MINUTES. No placeholders like «not specified», «not assigned», «no data», «to be clarified», «unclear» (or their equivalents in any language): simply leave such places out. No deadline was spoken — the task has no deadline. No owner was spoken — the task has no owner. Remove a section with nothing to write together with its heading.\\n3. NO TABLES. Only headings, short labels and numbered lists.\\n4. NO TIMECODES AND NO RECORDING TIMES — neither in brackets nor in the text.\\n5. EXTREMELY CONCISE. One item = one line of up to 15 words and one fact. Drop filler words: not «it was noted that creatinine is 200-240», but «Creatinine 200-240, urea 19». Do not retell the course of the conversation, keep the result. More than five items per topic means something is superfluous.\\n6. Write decisions and actions as concretely as possible: who it concerns (by name), which patient or which area, what exactly to do. Bad: «discuss the issue with the urologist». Good: «Andrei to agree the plan for the patient with the drain with the urologist».\\n7. An agenda item is not necessarily a patient: it can be a department, an area, a process or a manager. Write the heading by substance: the patient name, the area name or the question itself.\\n8. Write the drug, dose and route as plain text and only what was actually spoken: if a single drug was spoken without a dose — write only the drug. Doses, units and numbers — strictly as spoken, never guess; write the drug name itself in the spelling of the minutes language (see the language rule).\\n9. Key takeaways — three to five lines for someone who was not at the meeting: the most important outcome, without repeating the agenda items word for word.\\n10. Neutral business tone, no emotions or judgements. No conclusions, recommendations or medical advice of your own.\\n\\nRESPONSE STRUCTURE (Markdown, strictly in this order; skip a section with no content entirely, together with its heading):\\n\\n## Letter\\n**Subject:** MoM: [short title of the meeting based on its content] [' + $json.meetingDate + ']\\n\\n**Participants:** [names separated by commas; role in brackets if it was spoken]\\n\\n**Absentees:** [names — only if the conversation explicitly said someone is absent]\\n\\n**Agenda:** [one sentence on what the meeting was about]\\n\\n**Objectives:** [what needs to be achieved — only if it was spoken]\\n\\n### Agenda item 1. [patient, area or question]\\n1. [the point — one line]\\n2. [...]\\n\\n### Agenda item 2. [and so on for every question discussed]\\n1. [...]\\n\\n**Key takeaways:**\\n1. [the most important outcome of the meeting — one line]\\n\\n**Decisions:**\\n1. [who it concerns] — [what was decided: for which patient or area and what to do]\\n\\n**Action items:**\\n1. [who] — [what they will do][ — deadline, only if it was spoken]\\n\\n**Materials:** [tests, images, discharge summaries, links — only those explicitly named]\\n\\n---\\n\\n## Minutes of the meeting\\n- **Date:** ...\\n- **Participants:** [names separated by commas; role in brackets if clear]\\n- **Absentees:** [only if this was said]\\n- **Subject:** [one sentence]\\n\\n### Agenda item 1. [patient, area or question]\\n1. [what matters: condition, prescription, agreement — one line per item]\\n2. [...]\\n\\n### Agenda item 2\\n1. [...]\\n\\n### Key takeaways\\n1. [...]\\n\\n### Decisions\\n1. [who it concerns] — [what was decided, as concretely as possible]\\n\\n### Action items\\n1. [who] — [what they will do][ — deadline, only if it was spoken]\\n\\n### Materials\\n1. [what exactly was named]\\n\\n### Open questions\\n1. [what remained unresolved — only if this was explicitly said in the conversation]\\n\\n### Next meeting\\n[date and topic — only if spoken; if not spoken, this section is not in the response]\\n\\nReturn only Markdown, with no explanations before or after and without ``` fences.' }, { role: 'user', content: $json.text } ] } }}",
+    "options": {
+     "timeout": 1200000
+    }
+   },
+   "id": "e4e29638-9a4f-4e01-9c22-6777b9fb016c",
+   "name": "MoM report (per language, gpt-4.1)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15248,
+    6224
+   ],
+   "retryOnFail": true,
+   "maxTries": 2,
+   "waitBetweenTries": 5000
+  },
+  {
+   "parameters": {
+    "jsCode": "// Reports RU / RO / EN + transcript + source versions. The files are written by the site.\nconst tz = 'Europe/Chisinau';\nconst form = $('Job').first();\nconst rec = form.json.submittedAt ? DateTime.fromISO(form.json.submittedAt).setZone(tz) : $now.setZone(tz);\nconst created = $now.setZone(tz);\nlet src = (form.json.fileName || 'audio').replace(/\\.[^.]+$/, '').replace(/[^\\p{L}\\p{N}_-]+/gu, '_');\nif (!/^medminute/i.test(src)) src = 'MedMinute_' + src;\nconst base = `${src}__recorded-${rec.toFormat('yyyy-LL-dd_HH-mm')}__report-${created.toFormat('yyyy-LL-dd_HH-mm')}`;\nconst head = (title) => [`# ${title}`, '', `File: ${form.json.fileName || '—'}`,\n  `Recording uploaded: ${rec.toFormat('dd.LL.yyyy HH:mm')}`, `Report created: ${created.toFormat('dd.LL.yyyy HH:mm')}`, '', '---', ''].join('\\n');\n\nconst langs = $('Three languages').all().map(i => i.json.lang);\n\n// The original recording is appended to the end of every report: you can see that part of the speech was\n// in Russian, part in Romanian, part in English — and compare it with the minutes.\nconst L = $('Three languages').first().json;\nconst tail = ['', '---', '', '## Original recording (as spoken)', '',\n  `Languages in the recording: ${L.langLine || '—'}.`,\n  'The tag at the start of a line is the utterance language. The text was not translated or edited.', '',\n  '```', L.original || '', '```', ''].join('\\n');\nconst out = $input.all().map((it, i) => {\n  const lang = langs[i] || `lang${i}`;\n  const content = String(it.json.choices?.[0]?.message?.content ?? '').replace(/^\\`\\`\\`(?:markdown|md)?\\s*|\\s*\\`\\`\\`$/g, '').trim();\n  if (!content) throw new Error(`Empty model response for language ${lang}`);\n  return { json: { lang, fileName: `${base}.${lang}.md`, content: content + '\\n' + tail } };\n});\n\n// final transcript (assembled, with speakers, in the original languages)\nconst fin = $('Transcript with names').first().json;\nout.push({ json: { lang: 'transcript', fileName: `${base}.transcript.md`,\n  content: head('Meeting transcript (original languages, with speakers)')\n    + `Participants (by voice): ${(fin.speakers || []).join(', ') || '—'}\\n\\n` + fin.text + '\\n' } });\n\n// source recognitions — for manual checking of disputed places\nconst fmt = (s) => { s = Math.max(0, Math.round(+s || 0)); const p = n => String(n).padStart(2, '0');\n  const h = Math.floor(s / 3600); return (h ? p(h) + ':' : '') + p(Math.floor((s % 3600) / 60)) + ':' + p(s % 60); };\nconst V = $('Join versions').first().json.variants || {};\nconst D = $('Speakers (format)').first().json.segments || [];\nout.push({ json: { lang: 'sources', fileName: `${base}.sources.md`, content: [head('Source recognitions (no AI edits)'),\n  '## Speaker labels (diarize)', '', ...D.map(x => `[${fmt(x.t)}] ${x.spk}: ${x.text}`), '',\n  '## Version 15s', '', ...(V['15s'] || []).map(x => `[${fmt(x.t)}] ${x.text}`), '',\n  '## Version 5s', '', ...(V['5s'] || []).map(x => `[${fmt(x.t)}] ${x.text}`), ''].join('\\n') } });\nreturn out;"
+   },
+   "id": "39ffd6e6-bd43-4897-827a-8cc09accf11f",
+   "name": "Build files",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15472,
+    6224
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Who speaks\nThe whole recording (compressed to 32 kbps) → diarize → Participant 1, 2, 3… by voice",
+    "height": 260,
+    "width": 900,
+    "color": 5
+   },
+   "id": "f3c4ed9a-b25a-41e6-aa30-dff44213fbfa",
+   "name": "Note A",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    12560,
+    5888
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Two text versions\nPauses → slicing 15s and 5s (in silence, with overlap) → gpt-4o-transcribe → join",
+    "height": 260,
+    "width": 1560,
+    "color": 4
+   },
+   "id": "bd487312-0435-4cf8-9153-f4fc6439f422",
+   "name": "Note B",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    12560,
+    6352
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Assembly and reports\nSpeakers + 15s + 5s → one verbatim transcript (original language, with speakers) → reports RU / RO / EN → 5 files in C:\\medminute\\reports",
+    "height": 300,
+    "width": 1600,
+    "color": 6
+   },
+   "id": "a295fb2c-bbe6-4404-9160-6190b5f31eb5",
+   "name": "Note C",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    14112,
+    6080
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://api.openai.com/v1/chat/completions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openAiApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ { model: 'gpt-4.1', temperature: 0, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You extract the DECISIONS and TASKS from the transcript of a medical meeting for a table. The speech is mixed: Russian, Romanian, English. Speakers are labelled «Participant N» or «Name (Participant N)» — if there is a name, write the name, not the number; write a name only if it was spoken. DO NOT anonymise patients: write first names, surnames and bed numbers exactly as spoken, and for every decision and task state which patient it relates to. Write the wording in English, but keep names, drugs, doses, abbreviations and numbers as spoken. Only what was actually said: do not invent anything. A decision is something that was agreed or resolved (not an opinion and not a proposal without agreement). A task is a concrete action for a concrete owner; phrase it as [verb] + [what]. Who proposed and who approved a decision are different fields: often one participant proposes and another (usually the chair or the most senior person) approves; if it is the same person, put them in both fields. If the owner, deadline, author or approver was not spoken — write «not specified». Do not assign a task based on indirect context. Take the timecode from the transcript in mm:ss format. Neutral business tone. ' + $json.roster + 'LINKING TO A PATIENT is mandatory: if an utterance is about a patient from the directory (named by name, by bed or by a pronoun in the same fragment), fill the patient field with the name and bed exactly as in the directory. Leave patient empty only for truly organisational questions (schedule, equipment, reporting). Do not create a row that has neither a patient, nor an owner, nor a concrete action: such a record is useless. Return ONLY JSON of the form: {\"meeting_title\": \"short title of the meeting\", \"decisions\": [{\"patient\": \"which patient it relates to (first name/surname/bed as spoken) or empty if the decision is not about a patient\", \"decision\": \"\", \"proposed_by\": \"who proposed\", \"approved_by\": \"who approved / accepted\", \"timecode\": \"\", \"context\": \"1 short sentence: why / about what\"}], \"action_items\": [{\"patient\": \"patient (as spoken) or empty\", \"task\": \"\", \"owner\": \"\", \"deadline\": \"as said\", \"timecode\": \"\"}]}. If there are no decisions or tasks — an empty array.' }, { role: 'user', content: $json.text } ] } }}",
+    "options": {
+     "timeout": 600000
+    }
+   },
+   "id": "47cc39f8-1bb9-414b-b1cf-7334415aacc1",
+   "name": "Decisions and tasks (JSON, gpt-4.1)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15024,
+    6544
+   ],
+   "retryOnFail": true,
+   "maxTries": 2,
+   "waitBetweenTries": 5000
+  },
+  {
+   "parameters": {
+    "jsCode": "const tz = 'Europe/Chisinau';\nconst form = $('Job').first();\nconst sub = form.json.submittedAt;\nconst meetingDate = (sub ? DateTime.fromISO(sub) : $now).setZone(tz).toFormat('dd.LL.yyyy');\nconst added = $now.setZone(tz).toFormat('dd.LL.yyyy HH:mm');\nconst file = form.json.fileName || '—';\nconst raw = String($json.choices?.[0]?.message?.content || '{}').replace(/^```\\w*\\s*|\\s*```$/g, '');\nlet data; try { data = JSON.parse(raw); } catch (e) { throw new Error('The model returned invalid JSON: ' + raw.slice(0, 500)); }\nconst title = data.meeting_title || 'Meeting';\nconst rows = (data.decisions || []).map((x, i) => ({ json: {\n  'Meeting date': meetingDate, 'Meeting': title, '#': i + 1, 'Patient': x.patient || '',\n  'Decision': x.decision || '', 'Proposed by': x.proposed_by || 'not specified', 'Approved by': x.approved_by || 'not specified',\n  'Timecode': x.timecode || '', 'Context': x.context || '',\n  'Recording file': file, 'Added': added,\n} }));\nreturn [{ json: { rows: rows.map(r => r.json ?? r) } }];\n"
+   },
+   "id": "722525d6-21cc-4285-8e99-68222db35cfe",
+   "name": "Rows: decisions",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15248,
+    6464
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "const tz = 'Europe/Chisinau';\nconst form = $('Job').first();\nconst sub = form.json.submittedAt;\nconst meetingDate = (sub ? DateTime.fromISO(sub) : $now).setZone(tz).toFormat('dd.LL.yyyy');\nconst added = $now.setZone(tz).toFormat('dd.LL.yyyy HH:mm');\nconst file = form.json.fileName || '—';\nconst raw = String($json.choices?.[0]?.message?.content || '{}').replace(/^```\\w*\\s*|\\s*```$/g, '');\nlet data; try { data = JSON.parse(raw); } catch (e) { throw new Error('The model returned invalid JSON: ' + raw.slice(0, 500)); }\nconst title = data.meeting_title || 'Meeting';\nconst rows = (data.action_items || []).map((x, i) => ({ json: {\n  'Meeting date': meetingDate, 'Meeting': title, '#': i + 1, 'Patient': x.patient || '',\n  'Task': x.task || '', 'Owner': x.owner || 'not specified', 'Deadline': x.deadline || 'not specified',\n  'Timecode': x.timecode || '', 'Status': 'New',\n  'Recording file': file, 'Added': added,\n} }));\nreturn [{ json: { rows: rows.map(r => r.json ?? r) } }];\n"
+   },
+   "id": "b7bb6e68-93c2-4ba0-b937-f84e4fb6fc2c",
+   "name": "Rows: tasks",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15248,
+    6640
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Result → site localhost:7777\nDecisions, tasks, prescriptions, minutes and transcript go to the site as POST requests\n(`/api/jobs/<jobId>/part/...`), the site stores them in the local SQLite.\nGoogle Sheets are no longer needed.",
+    "height": 340,
+    "width": 700,
+    "color": 3
+   },
+   "id": "7692786c-5b18-46bd-9a18-3d641013065f",
+   "name": "Note D",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    14992,
+    6400
+   ]
+  },
+  {
+   "parameters": {
+    "jsCode": "// Minutes in 3 languages for the site\nconst tz = 'Europe/Chisinau';\nconst j = $('Job').first().json;\nconst meetingDate = DateTime.fromISO(j.submittedAt).setZone(tz).toFormat('dd.LL.yyyy');\nconst clean = (s) => String(s || '').replace(/^\\`\\`\\`(?:markdown|md)?\\s*|\\s*\\`\\`\\`$/g, '').trim();\nconst langs = $('Three languages').all().map(i => i.json.lang);\nconst mom = {};\n$input.all().forEach((it, i) => { mom[langs[i]] = clean(it.json.choices?.[0]?.message?.content); });\n// The meeting title is taken from the English minutes (falls back to Russian).\nconst m = (mom.en || mom.ru || '').match(/MoM:\\s*(.+?)\\s*\\[/);\nconst fin = $('Transcript with names').first().json;\nconst L = $('Three languages').first().json;\nreturn [{ json: {\n  title: m ? m[1].trim() : 'Meeting',\n  meetingDate,\n  participants: fin.speakers || [],\n  fileName: j.fileName,\n  ru: mom.ru || '', ro: mom.ro || '', en: mom.en || '',\n  original: L.original || '', langStats: L.langStats || [], langLine: L.langLine || '',\n  mentioned: fin.mentioned || [],\n} }];"
+   },
+   "id": "4bf93f54-457d-4929-8bfb-2e90ac3aee2d",
+   "name": "Row: meeting",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15472,
+    6352
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://api.openai.com/v1/chat/completions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openAiApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ { model: 'gpt-4.1', temperature: 0, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'You are a medical secretary. From the transcript of a doctors meeting (ward round / morning briefing) extract ALL patients who were discussed and ALL drugs and prescriptions for each of them. This is the most important part of the minutes. The speech is mixed: Romanian, Russian, English. Speakers are labelled «Participant N» or «Name (Participant N)» — if there is a name, write the name, not the number. PATIENTS: do not anonymise. Write first names, surnames, bed/ward numbers (patul 8, pacientul de la patul 9, bed 4) EXACTLY as spoken. If a patient is referred to only by bed, the identifier = the bed. Link repeated mentions of the same patient (he, dânsul, this patient) to the right patient by context; if the link is not obvious, note it in the note field. DRUGS: record every mention of a drug that relates to a patient: given, prescribed, continued, increased, decreased, stopped, replaced or only discussed. drug — EXACTLY as in the transcript (even if it was recognised with an error); drug_normalized — the probable correct international name, only if you are sure (for example noro-tribunină → noradrenalină), otherwise empty. Write the dose, rate, frequency and route only as said, NEVER guess and never recalculate numbers. quote — a verbatim quote from the transcript where this was said. confidence: high / medium / low — how clearly the transcript shows which patient, which drug and which dose. Do not invent anything. What was not said — empty or «not specified». ' + $json.roster + 'Take patient names and beds from the directory if they are there — otherwise the same person ends up in the table as two different records. Attribute the condition (status) to the patient who was discussed in the same fragment of the conversation. Return ONLY JSON: {\"patients\": [{\"patient\": \"\", \"bed\": \"\", \"status\": \"condition/diagnosis briefly, as said\", \"first_mention\": \"mm:ss\", \"note\": \"\", \"medications\": [{\"drug\": \"\", \"drug_normalized\": \"\", \"dose\": \"\", \"route\": \"\", \"action\": \"\", \"by\": \"who prescribed or reported\", \"timecode\": \"mm:ss\", \"quote\": \"\", \"confidence\": \"\"}]}]}' }, { role: 'user', content: $json.text } ] } }}",
+    "options": {
+     "timeout": 900000
+    }
+   },
+   "id": "73669aae-2cfa-43ee-a9fc-cede2357bd3e",
+   "name": "Patients and prescriptions (JSON, gpt-4.1)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15024,
+    6848
+   ],
+   "retryOnFail": true,
+   "maxTries": 2,
+   "waitBetweenTries": 5000
+  },
+  {
+   "parameters": {
+    "jsCode": "// One row per prescription; a patient without prescriptions also gets a row (so they are not lost)\nconst tz = 'Europe/Chisinau';\nconst form = $('Job').first();\nconst sub = form.json.submittedAt;\nconst meetingDate = (sub ? DateTime.fromISO(sub) : $now).setZone(tz).toFormat('dd.LL.yyyy');\nconst added = $now.setZone(tz).toFormat('dd.LL.yyyy HH:mm');\nconst file = form.json.fileName || '—';\nconst raw = String($json.choices?.[0]?.message?.content || '{}').replace(/^```\\w*\\s*|\\s*```$/g, '');\nlet data; try { data = JSON.parse(raw); } catch (e) { throw new Error('The model returned invalid JSON: ' + raw.slice(0, 500)); }\nconst rows = [];\nfor (const p of data.patients || []) {\n  const base = {\n    'Meeting date': meetingDate,\n    'Patient': p.patient || 'not specified',\n    'Bed / ward': p.bed || '',\n    'Condition (as stated)': p.status || '',\n  };\n  const meds = (p.medications || []).length ? p.medications : [null];\n  for (const m of meds) {\n    rows.push({ json: { ...base,\n      'Drug (as heard)': m ? (m.drug || '') : '— no prescriptions mentioned —',\n      'Drug (probable)': m ? (m.drug_normalized || '') : '',\n      'Dose': m ? (m.dose || 'not specified') : '',\n      'Route': m ? (m.route || '') : '',\n      'Action': m ? (m.action || '') : '',\n      'Prescribed / reported by': m ? (m.by || 'not specified') : '',\n      'Timecode': m ? (m.timecode || '') : (p.first_mention || ''),\n      'Quote': m ? (m.quote || '') : '',\n      'Confidence': m ? (m.confidence || '') : '',\n      'Note': p.note || '',\n      'Checked by physician': '',\n      'Recording file': file,\n      'Added': added,\n    } });\n  }\n}\nreturn [{ json: { rows: rows.map(r => r.json ?? r) } }];"
+   },
+   "id": "3d82fab0-c1f0-43ce-948b-a8ea66939565",
+   "name": "Rows: prescriptions",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15248,
+    6848
+   ]
+  },
+  {
+   "parameters": {
+    "content": "## Patients and prescriptions\nTranscript → all patients (as named: surname / bed) and all drugs for each → the \"Prescriptions\" table (one row = one prescription, with a quote and confidence). The \"Checked by physician\" column is for manual review.",
+    "height": 300,
+    "width": 760,
+    "color": 2
+   },
+   "id": "4e1d97e3-b33d-44bb-a9ca-a1dc7960526c",
+   "name": "Note E",
+   "type": "n8n-nodes-base.stickyNote",
+   "typeVersion": 1,
+   "position": [
+    14992,
+    6768
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "https://api.openai.com/v1/chat/completions",
+    "authentication": "predefinedCredentialType",
+    "nodeCredentialType": "openAiApi",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ { model: 'gpt-4.1', temperature: 0, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: 'Determine who is who at the meeting. In the transcript speakers are labelled «Participant N» (told apart by voice). For each Participant find their NAME, only if there is evidence in the text: they introduced themselves; they were addressed by name and replied with the next utterance; someone said «now John will report» and then they speak; they were called by name in reply to their utterance (domnule Andrei, John Smith). Also the role/position, if it was spoken or follows unambiguously from the words (head of department, cardiologist, doctor on duty, nurse). Do not confuse speakers with people who are only talked about (patients, colleagues who are not at the meeting). Do not invent: no evidence — name is empty. confidence: high — direct evidence; medium — indirect but probable; low — a guess (do not give such a name at all, leave it empty). Write the name as it was spoken (in Cyrillic or Latin script). SEPARATELY collect everyone who was TALKED ABOUT but is not among the speakers: patients, doctors and relatives mentioned in the conversation. For each: first name/surname or how they were referred to («the patient in bed 3»), kind (patient / doctor / nurse / relative / other), about — one line on who this is and what is going on with them, bed — bed or ward, if spoken. DO NOT anonymise patients: write the name and bed exactly as spoken. If a person was talked about but never named — leave name empty and describe in about how they were referred to in the conversation.\\n\\nReturn ONLY JSON: {\"speakers\": [{\"speaker\": \"Participant 1\", \"name\": \"\", \"role\": \"\", \"confidence\": \"\", \"evidence\": \"[mm:ss] short quote\"}], \"mentioned\": [{\"name\": \"\", \"kind\": \"\", \"about\": \"\", \"bed\": \"\", \"evidence\": \"[mm:ss] short quote\"}]}' }, { role: 'user', content: $json.text } ] } }}",
+    "options": {
+     "timeout": 600000
+    }
+   },
+   "id": "c6f070d4-c647-4e31-bc2b-6f24a0361cd8",
+   "name": "Who is who (names, gpt-4.1)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    14912,
+    6000
+   ],
+   "retryOnFail": true,
+   "maxTries": 2,
+   "waitBetweenTries": 5000
+  },
+  {
+   "parameters": {
+    "jsCode": "// Puts names into the transcript: \"Participant 2:\" → \"John Smith, cardiologist (Participant 2):\"\n// medium confidence is marked \"(?)\", low is not substituted\nconst fin = $('Final transcript').first().json;\nconst raw = String($json.choices?.[0]?.message?.content || '{}').replace(/^```\\w*\\s*|\\s*```$/g, '');\nlet data = {}; try { data = JSON.parse(raw); } catch (e) { data = {}; }\nconst map = {};\nfor (const s of data.speakers || []) {\n  const conf = String(s.confidence || '').toLowerCase();\n  // The Cyrillic prefixes are a fallback in case the model answers the confidence in Russian.\n  if (!s.speaker || !s.name || conf.startsWith('low') || conf.startsWith('низ')) continue;\n  const q = conf.startsWith('med') || conf.startsWith('сред') ? ' (?)' : '';\n  const role = s.role ? `, ${s.role}` : '';\n  map[s.speaker.trim()] = `${s.name.trim()}${q}${role} (${s.speaker.trim()})`;\n}\nconst esc = (x) => x.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\nlet text = String(fin.text || '');\nfor (const [spk, label] of Object.entries(map)) {\n  text = text.replace(new RegExp(`(\\\\]\\\\s*)${esc(spk)}(?=\\\\s*:)`, 'g'), `$1${label}`);\n}\nconst speakers = (fin.speakers || []).map(s => map[s] || s);\nconst evidence = data.speakers || [];\nconst mentioned = data.mentioned || [];\n\n// People directory: who spoke and who was talked about. It goes into the prompts of all three branches,\n// so that decisions, tasks and prescriptions are linked to a specific patient rather than \"not specified\".\nconst spkList = evidence.filter((s) => s.name)\n  .map((s) => `- ${s.name}${s.role ? `, ${s.role}` : ''} — is ${s.speaker}` + (s.evidence ? ` (${s.evidence})` : ''));\nconst menList = mentioned\n  .map((m) => `- ${m.name || 'name not mentioned'}${m.kind ? ` — ${m.kind}` : ''}`\n    + `${m.bed ? `, bed/ward ${m.bed}` : ''}${m.about ? `: ${m.about}` : ''}`\n    + (m.evidence ? ` (${m.evidence})` : ''));\n// The Cyrillic alternatives are a fallback in case the model answers the kind in Russian.\nconst patients = mentioned.filter((m) => !m.kind || /patient|pacient|пациент|больн/i.test(m.kind))\n  .map((m) => [m.name, m.bed && `bed/ward ${m.bed}`].filter(Boolean).join(', '))\n  .filter(Boolean);\nlet roster = '';\nif (spkList.length || menList.length) {\n  roster = '\\n\\nPEOPLE DIRECTORY (established in advance, use exactly these names):\\n'\n    + (spkList.length ? 'Speakers at the meeting:\\n' + spkList.join('\\n') + '\\n' : '')\n    + (menList.length ? 'People who were talked about (mostly patients):\\n' + menList.join('\\n') + '\\n' : '')\n    + 'In the minutes call these people by name. Keep \"Participant N\" only where there is no name '\n    + 'either in the directory or in the transcript. In the \"Patients and prescriptions\" section make the heading of each '\n    + 'block the patient name and bed, not \"patient not named\".\\n';\n}\nreturn [{ json: { text, speakers, nameMap: map, evidence, mentioned, roster, patients } }];"
+   },
+   "id": "692fbf05-5bdc-49df-9253-410a4781fbf5",
+   "name": "Transcript with names",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    15136,
+    6000
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/status",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ stage: \"audio received, preparing the slicing\" }) }}",
+    "options": {
+     "timeout": 20000
+    }
+   },
+   "id": "st-1",
+   "name": "Site: status (audio received)",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    12608,
+    6448
+   ],
+   "executeOnce": true,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/transcript",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ text: $json.text, speakers: $json.speakers, nameMap: $json.nameMap, evidence: $json.evidence }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-transcript",
+   "name": "Site: transcript",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15360,
+    5840
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/mom",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify($json) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-mom",
+   "name": "Site: minutes",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15680,
+    6352
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/decisions",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ rows: $json.rows }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-decisions",
+   "name": "Site: decisions",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15472,
+    6464
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/tasks",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ rows: $json.rows }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-tasks",
+   "name": "Site: tasks",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15472,
+    6640
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/patients",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ rows: $json.rows }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-patients",
+   "name": "Site: prescriptions",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15472,
+    6848
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/files",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ rows: $input.all().map(i => i.json) }) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-files",
+   "name": "Site: files",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    15680,
+    6224
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "executeOnce": true,
+   "onError": "continueRegularOutput"
+  },
+  {
+   "parameters": {
+    "jsCode": "// Source recognitions — to the site, \"Source versions\" tab\nconst fmt = (s) => { s = Math.max(0, Math.round(+s || 0)); const p = n => String(n).padStart(2, '0');\n  const h = Math.floor(s / 3600); return (h ? p(h) + ':' : '') + p(Math.floor((s % 3600) / 60)) + ':' + p(s % 60); };\nconst V = $('Join versions').first().json.variants || {};\nconst D = $('Speakers (format)').first().json.segments || [];\nreturn [{ json: {\n  diar: D.map(x => `[${fmt(x.t)}] ${x.spk}: ${x.text}`).join('\\n'),\n  v15: (V['15s'] || []).map(x => `[${fmt(x.t)}] ${x.text}`).join('\\n'),\n  v5: (V['5s'] || []).map(x => `[${fmt(x.t)}] ${x.text}`).join('\\n'),\n} }];"
+   },
+   "id": "src-build",
+   "name": "Source versions (text)",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    14592,
+    6000
+   ]
+  },
+  {
+   "parameters": {
+    "method": "POST",
+    "url": "={{ $('Job').first().json.callbackUrl }}/part/sources",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify($json) }}",
+    "options": {
+     "timeout": 120000
+    }
+   },
+   "id": "site-sources",
+   "name": "Site: source versions",
+   "type": "n8n-nodes-base.httpRequest",
+   "typeVersion": 4.2,
+   "position": [
+    14800,
+    5840
+   ],
+   "retryOnFail": true,
+   "maxTries": 3,
+   "waitBetweenTries": 2000,
+   "onError": "continueRegularOutput"
+  }
+ ],
+ "connections": {
+  "Compress whole recording (ffmpeg)": {
+   "main": [
+    [
+     {
+      "node": "Read compressed recording",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Read compressed recording": {
+   "main": [
+    [
+     {
+      "node": "Who speaks (gpt-4o-transcribe-diarize)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Who speaks (gpt-4o-transcribe-diarize)": {
+   "main": [
+    [
+     {
+      "node": "Speakers (format)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Speakers (format)": {
+   "main": [
+    [
+     {
+      "node": "Wait for both branches",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Find pauses (ffmpeg)": {
+   "main": [
+    [
+     {
+      "node": "Slicing variants",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Slicing variants": {
+   "main": [
+    [
+     {
+      "node": "Cut segments (ffmpeg)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Cut segments (ffmpeg)": {
+   "main": [
+    [
+     {
+      "node": "Read segments",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Read segments": {
+   "main": [
+    [
+     {
+      "node": "Number segments",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Number segments": {
+   "main": [
+    [
+     {
+      "node": "Transcribe 15s + 5s (gpt-4o-transcribe)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Transcribe 15s + 5s (gpt-4o-transcribe)": {
+   "main": [
+    [
+     {
+      "node": "Join versions",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Join versions": {
+   "main": [
+    [
+     {
+      "node": "Wait for both branches",
+      "type": "main",
+      "index": 1
+     }
+    ]
+   ]
+  },
+  "Wait for both branches": {
+   "main": [
+    [
+     {
+      "node": "Final transcript",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Delete temp files",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Source versions (text)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Final transcript": {
+   "main": [
+    [
+     {
+      "node": "Who is who (names, gpt-4.1)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Three languages": {
+   "main": [
+    [
+     {
+      "node": "MoM report (per language, gpt-4.1)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "MoM report (per language, gpt-4.1)": {
+   "main": [
+    [
+     {
+      "node": "Build files",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Row: meeting",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Build files": {
+   "main": [
+    [
+     {
+      "node": "Site: files",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Decisions and tasks (JSON, gpt-4.1)": {
+   "main": [
+    [
+     {
+      "node": "Rows: decisions",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Rows: tasks",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Rows: decisions": {
+   "main": [
+    [
+     {
+      "node": "Site: decisions",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Rows: tasks": {
+   "main": [
+    [
+     {
+      "node": "Site: tasks",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Row: meeting": {
+   "main": [
+    [
+     {
+      "node": "Site: minutes",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Patients and prescriptions (JSON, gpt-4.1)": {
+   "main": [
+    [
+     {
+      "node": "Rows: prescriptions",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Rows: prescriptions": {
+   "main": [
+    [
+     {
+      "node": "Site: prescriptions",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Who is who (names, gpt-4.1)": {
+   "main": [
+    [
+     {
+      "node": "Transcript with names",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Transcript with names": {
+   "main": [
+    [
+     {
+      "node": "Three languages",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Decisions and tasks (JSON, gpt-4.1)",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Patients and prescriptions (JSON, gpt-4.1)",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Site: transcript",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Start (webhook from site)": {
+   "main": [
+    [
+     {
+      "node": "Job",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Job": {
+   "main": [
+    [
+     {
+      "node": "Compress whole recording (ffmpeg)",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Find pauses (ffmpeg)",
+      "type": "main",
+      "index": 0
+     },
+     {
+      "node": "Site: status (audio received)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Source versions (text)": {
+   "main": [
+    [
+     {
+      "node": "Site: source versions",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1",
+  "availableInMCP": false,
+  "callerPolicy": "workflowsFromSameOwner"
+ },
+ "meta": {
+  "templateCredsSetupCompleted": true
+ }
+}

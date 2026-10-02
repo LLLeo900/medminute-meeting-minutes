@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    name: Site and n8n workflows
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - name: Static checks (JS syntax, workflow integrity)
+        run: npm test
+      - name: Smoke test — the server starts and answers
+        run: |
+          mkdir -p "$RUNNER_TEMP/mm/audio" "$RUNNER_TEMP/mm/reports" "$RUNNER_TEMP/mm/voices"
+          AUDIO_DIR="$RUNNER_TEMP/mm/audio" REPORTS_DIR="$RUNNER_TEMP/mm/reports" \
+          VOICES_DIR="$RUNNER_TEMP/mm/voices" AUTO_VOICEID=0 PORT=7777 node server.js &
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:7777/api/health && break; sleep 0.5; done
+          curl -fs http://127.0.0.1:7777/api/health
+          curl -fs http://127.0.0.1:7777/ | grep -q '<title>MedMeet'
+
+  asr:
+    name: ASR service (syntax)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile all Python files
+        run: python -m compileall -q site

@@ -1,0 +1,6 @@
+# Optional extras for the local ASR service.
+# ECAPA voice prints (192-dim vectors; better than the WeSpeaker ONNX fallback):
+torch>=2.1
+speechbrain>=1.0
+# pyannote diarization (needs HF_TOKEN and the pyannote terms accepted on Hugging Face):
+# pyannote.audio>=3.1
